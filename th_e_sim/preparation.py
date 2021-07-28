@@ -259,3 +259,139 @@ def _process_power(energy, filter=True): #@ReservedAssignment
 
     return column_power
 
+
+def process_acorn_lcl(system, acorn_libs = 'Acorn_LCL'):
+
+    # choose categories
+    key_search = _what_to_search()
+    # read category statistics
+    acorn_details = pd.read_csv(os.path.join(acorn_libs, 'acorn_details.csv'))#skipinitialspace=True, low_memory=False, sep=',', index_col=[index], parse_dates=[index])
+
+
+    #seeking the best fitting group
+    best_group = _get_best_fit_group(key_search, acorn_details)
+
+    #get all the ids from dataset information
+    grouped_blocks = _get_grouped_blocks(best_group, acorn_libs)
+
+    #get all the data from dataset on data
+    whole_energy_on_group = _get_whole_energy_data(grouped_blocks, acorn_libs)
+    whole_energy_on_group = whole_energy_on_group.fillna(0)
+    whole_energy_on_group = whole_energy_on_group.replace("Null", 0)
+
+    whole_energy_on_group.to_csv(os.path.join(r"C:\Users\jw\PycharmProjects\th-e-fcst\data\acorn_processed\whole_energy_on_group.csv"), sep=',', encoding='utf-8')
+
+    pivot_df = whole_energy_on_group.pivot(index='DateTime', columns='LCLid', values='KWh')
+
+    #changes the stucture of the data due tue
+    #datetime index and a culoum per ID    pivot_df.fillna(0)
+    # zeit codierung
+    pivot_df = pivot_df.replace("Null", 0)
+
+    pivot_df.to_csv(os.path.join(r"C:\Users\jw\PycharmProjects\th-e-fcst\data\acorn_processed\pivot_df.csv"), sep=',', encoding='utf-8')
+
+
+def _what_to_search():
+    q_a_pair_1 = ("Household Size", "Household size : 3-4 persons")
+    q_a_pair_2 = ("Structure", "Couple family with dependent children")
+    q_a_pair_3 = ("House Type", "Detached house")
+    q_a_pair_4 = ("House Size", "Number of Beds : 4")
+    search_keys = [q_a_pair_1, q_a_pair_2, q_a_pair_3, q_a_pair_4]
+
+    return search_keys
+
+def _build_percentage_pd(df_category, answer):
+    # df_category holds a certained slice of the arcon_group_details csv on a certain question category
+    # is the answer to search for df_category = df[df['CATEGORIES'] == category]
+
+    answer_index = 0
+    for entity in df_category.REFERENCE:
+        if entity == answer:
+            break
+        answer_index += 1
+
+    # get_group_labels
+    group_labels = [s for s in df_category.columns if "ACORN-" in s]
+    #computes the probability for each "a" on q fer group
+    df_cat_perc = df_category[group_labels].apply(lambda x: 100 * x / float(x.sum()))
+
+    # return probability for the correct "a" on "q"
+    df_perc_sel_answer = df_cat_perc.iloc[answer_index]
+
+    return df_perc_sel_answer
+
+def _get_best_fit_group(search_key,df):
+
+    all_percetage=[]
+    for _, q_a_pair in enumerate(search_key):
+        # computes per q_a_pair the probability for the "a" to be right within the Acorn groups
+        # and stors them in a dfs with are stored in the array all_percentage
+        #q_a_pair[0]]= question; q_a_pair[0]]=answer
+        all_percetage.append(_build_percentage_pd(df[df['CATEGORIES'] == q_a_pair[0]], q_a_pair[1]))
+    #makes a df out of the list of dfs
+    all_percetage = pd.concat(all_percetage, axis=1)
+    #computes the averaged value per acron group and returns the best group
+    all_percetage_mean = all_percetage.mean(axis=1)
+    best_group = all_percetage_mean.idxmax()
+
+    return best_group
+
+def _get_grouped_blocks(best_group,acorn_libs):
+    # in acron group
+    # out df grouped into blocks withe the  ids to the corresponding block
+    # load household informations
+
+    df_household = pd.read_csv(os.path.join(acorn_libs, 'informations_households.csv'))
+    #dataframe with all ids coresponding to acorn group
+    df_household_group = df_household[(df_household['Acorn'] == best_group)]
+    #new df with nutzdaten --> file indicates the blocks
+    x = pd.concat([df_household_group.file, df_household_group.LCLid], axis=1)
+    #grouped blocks is s df with all the ids grouped by the blocks where you find them
+    grouped_blocks = x.groupby('file')
+
+    return grouped_blocks
+
+def _get_whole_energy_data(grouped_blocks,acorn_libs):
+    # list of block to search for
+    list_of_blocks = list(grouped_blocks.indices.keys())
+    #appends all blocks with anergy data together
+    block_energy_list = []
+
+    for block in list_of_blocks:
+
+        #composes the link to the data of a block
+        block_link = acorn_libs + '\halfhourly_dataset\halfhourly_dataset' + block + ".csv"
+        block_link = block_link.replace("halfhourly_datasetblock", "halfhourly_dataset\\block")
+        df_block = pd.read_csv(os.path.join(acorn_libs, block_link), engine='python')
+
+        # holt alle ids zum block
+        arr_id_block = grouped_blocks.get_group(block).LCLid
+
+        # collects energy data for the block
+        df_block = df_block[df_block.LCLid.str.contains('|'.join(arr_id_block.array))]
+
+        # Renaming the columns
+        df_block.columns = ['LCLid', 'DateTime', 'KWh']
+
+        # Creating date, time related columns
+        df_block['DateTime'] = pd.to_datetime(df_block['DateTime'])
+
+        # appends energy df to block energy list
+        block_energy_list.append(df_block)
+    #energy tor all ids and from all blocks
+    whole_energy_on_group = pd.concat(block_energy_list)
+
+    return whole_energy_on_group
+
+def _prepair_time_triangular(whole_energy_on_group):
+    timestamp_s = whole_energy_on_group.DateTime.map(pd.Timestamp.timestamp)
+
+    day = 24 * 60 * 60
+    year = (365.2425) * day
+
+    whole_energy_on_group['Day sin'] = np.sin(timestamp_s * (2 * np.pi / day))
+    whole_energy_on_group['Day cos'] = np.cos(timestamp_s * (2 * np.pi / day))
+    whole_energy_on_group['Year sin'] = np.sin(timestamp_s * (2 * np.pi / year))
+    whole_energy_on_group['Year cos'] = np.cos(timestamp_s * (2 * np.pi / year))
+
+    return whole_energy_on_group
